@@ -1,61 +1,150 @@
-#include <juce_audio_processors/juce_audio_processors.h>
-#include <juce_audio_processors/format_types/juce_VST3PluginFormat.h>
-#include <juce_events/juce_events.h>
+#include <juce_audio_processors_headless/juce_audio_processors_headless.h>
+
+#include <algorithm>
+#include <cmath>
 #include <iostream>
-#include <memory>
+#include <set>
+
+namespace
+{
+juce::AudioProcessorParameter* findParameter(juce::AudioPluginInstance& instance,
+                                              const juce::String& name)
+{
+    for (auto* parameter : instance.getParameters())
+        if (parameter != nullptr && parameter->getName(128) == name)
+            return parameter;
+    return nullptr;
+}
+
+int failure(int code, const char* message)
+{
+    std::cerr << "[FAIL] " << message << '\n';
+    return code;
+}
+} // namespace
 
 int main(int argc, char** argv)
 {
-    if (argc < 3)
+    if (argc != 3)
     {
-        std::cerr << "usage: DeltaSpinePluginLoadTest <plugin-path> <expected-name>\n";
+        std::cerr << "usage: DeltaSpinePluginLoadTest <vst3-bundle> <expected-name>\n";
         return 2;
     }
 
     juce::ScopedJuceInitialiser_GUI initialiseJuce;
-    juce::VST3PluginFormat format;
+    juce::AudioPluginFormatManager manager;
+    juce::addHeadlessDefaultFormatsToManager(manager);
+
+    juce::AudioPluginFormat* vst3 = nullptr;
+    for (auto* format : manager.getFormats())
+        if (format != nullptr && format->getName().containsIgnoreCase("VST3"))
+            vst3 = format;
+    if (vst3 == nullptr)
+        return failure(3, "VST3 host format is unavailable");
+
     juce::OwnedArray<juce::PluginDescription> descriptions;
-    format.findAllTypesForFile(descriptions, argv[1]);
-    if (descriptions.isEmpty())
-    {
-        std::cerr << "no VST3 descriptions found in " << argv[1] << '\n';
-        return 1;
-    }
+    vst3->findAllTypesForFile(descriptions, juce::String(argv[1]));
+    if (descriptions.size() != 1)
+        return failure(4, "expected exactly one VST3 class");
+
+    auto* description = descriptions.getFirst();
+    if (description == nullptr || (description->name != argv[2] && description->descriptiveName != argv[2]))
+        return failure(5, "unexpected plug-in name");
+    if (description->manufacturerName != "EsionHsrahLatigid" || description->isInstrument)
+        return failure(6, "hosted identity should describe an EHL audio effect");
 
     juce::String error;
-    std::unique_ptr<juce::AudioPluginInstance> instance(
-        format.createInstanceFromDescription(*descriptions[0], 48000.0, 256, error));
+    auto instance = manager.createPluginInstance(*description, 48000.0, 256, error);
     if (instance == nullptr)
     {
-        std::cerr << "failed to instantiate VST3: " << error << '\n';
-        return 1;
-    }
-
-    if (instance->getName() != argv[2])
-    {
-        std::cerr << "unexpected plugin name: " << instance->getName() << '\n';
-        return 1;
+        std::cerr << "VST3 instantiation failed: " << error << '\n';
+        return 7;
     }
 
     instance->prepareToPlay(48000.0, 256);
-    juce::AudioBuffer<float> audio(2, 256);
-    for (int i = 0; i < audio.getNumSamples(); ++i)
-    {
-        const auto sample = static_cast<float>(0.15 * std::sin(0.07 * static_cast<double>(i)));
-        audio.setSample(0, i, sample);
-        audio.setSample(1, i, sample);
-    }
-    juce::MidiBuffer midi;
-    instance->processBlock(audio, midi);
-    for (int ch = 0; ch < audio.getNumChannels(); ++ch)
-        for (int i = 0; i < audio.getNumSamples(); ++i)
-            if (!std::isfinite(audio.getSample(ch, i)))
-            {
-                std::cerr << "non-finite VST3 output\n";
-                return 1;
-            }
+    if (instance->getLatencySamples() != 0)
+        return failure(8, "hosted latency should be zero");
 
-    std::cout << "Loaded " << instance->getName() << " from " << argv[1] << '\n';
+    constexpr const char* parameterNames[] {
+        "Mode", "Predict", "Depth", "Adapt", "Leak", "Density", "Mix", "Output"
+    };
+    for (const auto* name : parameterNames)
+        if (findParameter(*instance, name) == nullptr)
+            return failure(9, "hosted parameter set is incomplete");
+
+    findParameter(*instance, "Mode")->setValueNotifyingHost(1.0f);
+    for (const auto* name : { "Predict", "Depth", "Adapt", "Density", "Mix", "Output" })
+        findParameter(*instance, name)->setValueNotifyingHost(1.0f);
+    findParameter(*instance, "Leak")->setValueNotifyingHost(0.08f);
+
+    juce::MemoryBlock state;
+    instance->getStateInformation(state);
+    findParameter(*instance, "Density")->setValueNotifyingHost(0.0f);
+    instance->setStateInformation(state.getData(), static_cast<int>(state.getSize()));
+    if (state.isEmpty() || findParameter(*instance, "Density")->getValue() < 0.99f)
+        return failure(10, "hosted state should round-trip");
+
+    double sum = 0.0;
+    double sumSquares = 0.0;
+    float peak = 0.0f;
+    int clipped = 0;
+    int zeroCrossings = 0;
+    float previous = 0.0f;
+    bool hadPrevious = false;
+    std::set<int> buckets;
+    constexpr int blocks = 360;
+    constexpr int blockSize = 256;
+
+    for (int block = 0; block < blocks; ++block)
+    {
+        juce::AudioBuffer<float> audio(2, blockSize);
+        juce::MidiBuffer midi;
+        for (int sample = 0; sample < blockSize; ++sample)
+        {
+            const auto position = block * blockSize + sample;
+            const auto value = 0.24f * std::sin(2.0f * juce::MathConstants<float>::pi
+                                                * 730.0f * static_cast<float>(position) / 48000.0f);
+            audio.setSample(0, sample, value);
+            audio.setSample(1, sample, value);
+        }
+
+        instance->processBlock(audio, midi);
+        for (int channel = 0; channel < audio.getNumChannels(); ++channel)
+            for (int sample = 0; sample < audio.getNumSamples(); ++sample)
+            {
+                const auto value = audio.getSample(channel, sample);
+                if (!std::isfinite(value))
+                    return failure(11, "hosted render produced a non-finite sample");
+                sum += value;
+                sumSquares += static_cast<double>(value) * value;
+                peak = std::max(peak, std::abs(value));
+                clipped += std::abs(value) >= 0.979f ? 1 : 0;
+                if (hadPrevious && ((previous < 0.0f && value >= 0.0f) || (previous >= 0.0f && value < 0.0f)))
+                    ++zeroCrossings;
+                previous = value;
+                hadPrevious = true;
+                buckets.insert(static_cast<int>(std::round(value * 4096.0f)));
+            }
+    }
+
+    instance->releaseResources();
+    const auto sampleCount = static_cast<double>(blocks * blockSize * 2);
+    const auto rms = std::sqrt(sumSquares / sampleCount);
+    const auto dc = sum / sampleCount;
+    if (rms <= 0.02 || peak > 0.956f || std::abs(dc) >= rms
+        || clipped > 0 || zeroCrossings <= 128 || buckets.size() <= 64)
+    {
+        std::cerr << "hosted audibility contract failed: rms=" << rms
+                  << " peak=" << peak << " dc=" << dc
+                  << " clipped=" << clipped << " crossings=" << zeroCrossings
+                  << " buckets=" << buckets.size() << '\n';
+        return 12;
+    }
+
+    std::cout << "loaded=" << description->name
+              << " latency=" << instance->getLatencySamples()
+              << " rms=" << rms << " peak=" << peak
+              << " dc=" << dc << " crossings=" << zeroCrossings
+              << " buckets=" << buckets.size() << '\n';
     return 0;
 }
-
