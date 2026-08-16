@@ -4,6 +4,7 @@
 #include <cmath>
 #include <exception>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <numeric>
 #include <string>
@@ -24,6 +25,7 @@ struct Failure final : std::exception
 struct Metrics
 {
     float rms = 0.0f;
+    float lowBandRms = 0.0f;
     float peak = 0.0f;
     float dc = 0.0f;
     int zeroCrossings = 0;
@@ -53,6 +55,8 @@ Metrics measure(const std::vector<float>& signal)
     Metrics result;
     double sum = 0.0;
     double sumSquares = 0.0;
+    double lowBandSquares = 0.0;
+    float lowBand = 0.0f;
     bool hadPrevious = false;
     float previous = 0.0f;
     std::vector<int> buckets;
@@ -61,8 +65,10 @@ Metrics measure(const std::vector<float>& signal)
     for (auto sample : signal)
     {
         expect(std::isfinite(sample), "output must be finite");
+        lowBand += 0.08f * (sample - lowBand);
         sum += sample;
         sumSquares += static_cast<double>(sample) * sample;
+        lowBandSquares += static_cast<double>(lowBand) * lowBand;
         result.peak = std::max(result.peak, std::abs(sample));
         if (std::abs(sample) >= 0.979f)
             ++result.clipped;
@@ -76,6 +82,7 @@ Metrics measure(const std::vector<float>& signal)
     std::sort(buckets.begin(), buckets.end());
     result.uniqueBuckets = static_cast<int>(std::unique(buckets.begin(), buckets.end()) - buckets.begin());
     result.rms = signal.empty() ? 0.0f : static_cast<float>(std::sqrt(sumSquares / static_cast<double>(signal.size())));
+    result.lowBandRms = signal.empty() ? 0.0f : static_cast<float>(std::sqrt(lowBandSquares / static_cast<double>(signal.size())));
     result.dc = signal.empty() ? 0.0f : static_cast<float>(sum / static_cast<double>(signal.size()));
     return result;
 }
@@ -160,7 +167,10 @@ void silence_and_nonfinite_are_safe()
     core->prepare(44100.0, 2);
     for (int i = 0; i < 12000; ++i)
     {
-        const auto sample = i == 17 ? INFINITY : i == 901 ? NAN : 0.12f * std::sin(0.013f * static_cast<float>(i));
+        const auto sample = i == 17 ? INFINITY
+                          : i == 901 ? NAN
+                          : i == 1400 ? std::numeric_limits<float>::denorm_min()
+                                      : 0.12f * std::sin(0.013f * static_cast<float>(i));
         expect(std::isfinite(core->processSample(sample, params)), "non-finite input must be guarded");
     }
 }
@@ -225,6 +235,7 @@ void pdm_one_bit_mode_is_extreme_and_bounded()
               << " unique=" << metrics.uniqueBuckets
               << " clipped=" << metrics.clipped << '\n';
     expect(metrics.rms > 0.08f, "1-bit mode should be strongly audible");
+    expect(metrics.lowBandRms > 0.01f, "1-bit mode should not become ultrasonic-only");
     expect(metrics.peak <= 0.986f, "1-bit mode should stay below the final ceiling");
     expect(metrics.zeroCrossings > 1000, "1-bit mode should not flatten");
     expect(metrics.uniqueBuckets > 64, "1-bit reconstruction should not be a constant rail");
@@ -310,6 +321,7 @@ void extreme_audibility_rejects_collapses()
                   << " unique=" << metrics.uniqueBuckets
                   << " clipped=" << metrics.clipped << '\n';
         expect(metrics.rms > 0.01f, "extreme coder should not become all-zero");
+        expect(metrics.lowBandRms > 0.006f, "extreme coder should not become ultrasonic-only");
         expect(metrics.peak <= 0.986f, "extreme coder should stay bounded");
         expect(std::abs(metrics.dc) < metrics.rms * 0.95f, "extreme coder should not be DC dominated");
         expect(metrics.zeroCrossings > 16, "extreme coder should not become static");

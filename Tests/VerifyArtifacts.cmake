@@ -14,8 +14,10 @@ set(required
 
 if(APPLE)
     list(APPEND required "${STAGE_DIR}/standalone/${SLUG}_standalone_plugin.app")
-else()
+elseif(WIN32)
     list(APPEND required "${STAGE_DIR}/standalone/${SLUG}_standalone_plugin.exe")
+else()
+    list(APPEND required "${STAGE_DIR}/standalone/${SLUG}_standalone_plugin")
 endif()
 
 if(EXPECT_AU)
