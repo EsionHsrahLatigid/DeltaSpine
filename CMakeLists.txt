@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.22)
 
-project(DeltaSpine VERSION 0.1.0 LANGUAGES C CXX)
+project(DeltaSpine VERSION 0.1.1 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -86,6 +86,7 @@ if(DELTASPINE_BUILD_PLUGIN)
         NEEDS_MIDI_INPUT FALSE
         NEEDS_MIDI_OUTPUT FALSE
         IS_MIDI_EFFECT FALSE
+        AU_SANDBOX_SAFE TRUE
         EDITOR_WANTS_KEYBOARD_FOCUS TRUE
         MICROPHONE_PERMISSION_ENABLED TRUE
         MICROPHONE_PERMISSION_TEXT "DeltaSpine requires microphone access to process live audio input."
@@ -176,6 +177,7 @@ if(DELTASPINE_BUILD_PLUGIN)
     list(APPEND deltaspine_artifact_commands
         COMMAND ${CMAKE_COMMAND}
             -DPRODUCT_NAME=DeltaSpine
+            -DVERSION=${PROJECT_VERSION}
             -DSLUG=deltaspine
             -DBUNDLE_ID=jp.ehl.deltaspine
             -DPLUGIN_CODE=DlSp
@@ -219,8 +221,8 @@ if(DELTASPINE_BUILD_PLUGIN)
             COMMAND ${CMAKE_COMMAND}
                     -DSTAGE_DIR=${deltaspine_staged_products}
                     -DSLUG=deltaspine
+                    -DEXPECT_VERSION=${PROJECT_VERSION}
                     -DEXPECT_AU=$<BOOL:${APPLE}>
                     -P ${CMAKE_CURRENT_SOURCE_DIR}/Tests/VerifyArtifacts.cmake)
     endif()
 endif()
-
